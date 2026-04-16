@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import type { AuditLog as AuditLogType, Account } from '../api/types';
 import { listAuditLogs, listAccounts } from '../api/client';
-import { formatCents } from '../utils';
+import { formatPaisa } from '../utils';
 
 interface Props {
   onRefreshNeeded?: number;
@@ -86,7 +86,7 @@ export default function AuditLog({ onRefreshNeeded }: Props) {
                     {formatAccount(log.dest_account_id)}
                   </td>
                   <td className="px-4 py-3 text-right font-mono text-gray-800">
-                    {formatCents(log.amount)}
+                    {formatPaisa(log.amount)}
                   </td>
                   <td className="px-4 py-3">{outcomeBadge(log.outcome)}</td>
                   <td className="px-4 py-3 text-xs text-red-600">

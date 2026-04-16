@@ -16,6 +16,10 @@ const config = {
   redis: {
     url: process.env.REDIS_URL ?? 'redis://localhost:6379',
   },
+
+  account: {
+    minBalance: parseInt(process.env.MIN_BALANCE, 10) || 0,
+  },
 };
 
 export default config;

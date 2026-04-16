@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import type { Transaction, Account } from '../api/types';
 import { listTransactions, listAccounts, createReversal } from '../api/client';
-import { formatCents } from '../utils';
+import { formatPaisa } from '../utils';
 
 interface Props {
   onRefreshNeeded?: number;
@@ -111,7 +111,7 @@ export default function TransactionHistory({ onRefreshNeeded, onReversalSuccess 
                     {formatAccount(txn.dest_account_id)}
                   </td>
                   <td className="px-4 py-3 text-right font-mono text-gray-800">
-                    {formatCents(txn.amount)}
+                    {formatPaisa(txn.amount)}
                   </td>
                   <td className="px-4 py-3">{statusBadge(txn.status)}</td>
                   <td className="px-4 py-3">

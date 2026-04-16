@@ -3,7 +3,7 @@ import config from '../config/index.js';
 import logger from '../config/logger.js';
 
 // Parse BIGINT (OID 20) as JavaScript number instead of string.
-// Safe for balances in cents (max safe integer ~90 trillion dollars).
+// Safe for balances in paisa (max safe integer ~90 trillion rupees).
 pg.types.setTypeParser(20, (val) => Number(val));
 pg.types.setTypeParser(1700, (val) => parseFloat(val)); // NUMERIC
 

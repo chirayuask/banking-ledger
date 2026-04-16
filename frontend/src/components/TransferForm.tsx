@@ -31,8 +31,8 @@ export default function TransferForm({ onSuccess, onRefreshNeeded }: Props) {
     setLoading(true);
 
     try {
-      const amountCents = Math.round(parseFloat(amount) * 100);
-      if (isNaN(amountCents) || amountCents <= 0) {
+      const amountPaisa = Math.round(parseFloat(amount) * 100);
+      if (isNaN(amountPaisa) || amountPaisa <= 0) {
         setError('Amount must be greater than 0');
         return;
       }
@@ -46,22 +46,22 @@ export default function TransferForm({ onSuccess, onRefreshNeeded }: Props) {
           setError('Source and destination must be different');
           return;
         }
-        await createTransfer(sourceId, destId, amountCents);
-        setSuccess(`Transfer of $${amount} completed successfully`);
+        await createTransfer(sourceId, destId, amountPaisa);
+        setSuccess(`Transfer of ₹${amount} completed successfully`);
       } else if (opType === 'deposit') {
         if (!accountId) {
           setError('Select an account');
           return;
         }
-        await createDeposit(accountId, amountCents);
-        setSuccess(`Deposit of $${amount} completed successfully`);
+        await createDeposit(accountId, amountPaisa);
+        setSuccess(`Deposit of ₹${amount} completed successfully`);
       } else {
         if (!accountId) {
           setError('Select an account');
           return;
         }
-        await createWithdrawal(accountId, amountCents);
-        setSuccess(`Withdrawal of $${amount} completed successfully`);
+        await createWithdrawal(accountId, amountPaisa);
+        setSuccess(`Withdrawal of ₹${amount} completed successfully`);
       }
 
       setAmount('');
@@ -119,7 +119,7 @@ export default function TransferForm({ onSuccess, onRefreshNeeded }: Props) {
                 <option value="">Select source...</option>
                 {accounts.map((acc) => (
                   <option key={acc.id} value={acc.id}>
-                    {acc.name} — {acc.account_number} ({acc.ifsc_code}) — ${(acc.balance / 100).toFixed(2)}
+                    {acc.name} — {acc.account_number} ({acc.ifsc_code}) — ₹${(acc.balance / 100).toFixed(2)}
                   </option>
                 ))}
               </select>
@@ -135,7 +135,7 @@ export default function TransferForm({ onSuccess, onRefreshNeeded }: Props) {
                 <option value="">Select destination...</option>
                 {accounts.map((acc) => (
                   <option key={acc.id} value={acc.id}>
-                    {acc.name} — {acc.account_number} ({acc.ifsc_code}) — ${(acc.balance / 100).toFixed(2)}
+                    {acc.name} — {acc.account_number} ({acc.ifsc_code}) — ₹${(acc.balance / 100).toFixed(2)}
                   </option>
                 ))}
               </select>
@@ -153,7 +153,7 @@ export default function TransferForm({ onSuccess, onRefreshNeeded }: Props) {
               <option value="">Select account...</option>
               {accounts.map((acc) => (
                 <option key={acc.id} value={acc.id}>
-                  {acc.name} — {acc.account_number} ({acc.ifsc_code}) — ${(acc.balance / 100).toFixed(2)}
+                  {acc.name} — {acc.account_number} ({acc.ifsc_code}) — ₹${(acc.balance / 100).toFixed(2)}
                 </option>
               ))}
             </select>
@@ -161,7 +161,7 @@ export default function TransferForm({ onSuccess, onRefreshNeeded }: Props) {
         )}
 
         <div>
-          <label className="block text-sm text-gray-600 mb-1">Amount ($)</label>
+          <label className="block text-sm text-gray-600 mb-1">Amount (₹)</label>
           <input
             type="number"
             step="0.01"

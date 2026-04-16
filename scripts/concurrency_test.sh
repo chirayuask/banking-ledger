@@ -56,7 +56,7 @@ echo ""
 # TEST 1: Parallel Transfers (overdraft prevention)
 # ------------------------------------------
 log_info "TEST 1: Parallel transfers - overdraft prevention"
-log_info "Creating accounts: A=\$100, B=\$0"
+log_info "Creating accounts: A=₹100, B=₹0"
 
 ACCOUNT_A=$(create_account "Test-A" 10000)
 ACCOUNT_B=$(create_account "Test-B" 0)
@@ -68,10 +68,10 @@ fi
 
 log_info "Account A: $ACCOUNT_A"
 log_info "Account B: $ACCOUNT_B"
-log_info "Firing 20 concurrent \$10 transfers from A -> B..."
+log_info "Firing 20 concurrent ₹10 transfers from A -> B..."
 
-# Fire 20 concurrent transfers of $10 (1000 cents) each
-# Only 10 should succeed (A has $100 = 10000 cents)
+# Fire 20 concurrent transfers of ₹10 (1000 paisa) each
+# Only 10 should succeed (A has ₹100 = 10000 paisa)
 pids=()
 for i in $(seq 1 20); do
     curl -s -X POST "$BASE_URL/api/transfers" \
@@ -181,8 +181,8 @@ echo ""
 log_info "TEST 3: Concurrent deposits to same account"
 
 ACCOUNT_E=$(create_account "Test-E" 0)
-log_info "Account E: $ACCOUNT_E (starting balance: \$0)"
-log_info "Firing 10 concurrent \$10 deposits..."
+log_info "Account E: $ACCOUNT_E (starting balance: ₹0)"
+log_info "Firing 10 concurrent ₹10 deposits..."
 
 pids=()
 for i in $(seq 1 10); do

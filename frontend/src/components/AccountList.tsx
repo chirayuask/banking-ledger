@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import type { Account } from '../api/types';
 import { listAccounts, createAccount } from '../api/client';
-import { formatCents } from '../utils';
+import { formatPaisa } from '../utils';
 
 interface Props {
   onRefreshNeeded?: number;
@@ -39,12 +39,12 @@ export default function AccountList({ onRefreshNeeded }: Props) {
     setError('');
     setCreating(true);
     try {
-      const balanceCents = Math.round(parseFloat(balance) * 100);
-      if (isNaN(balanceCents) || balanceCents < 0) {
+      const balancePaisa = Math.round(parseFloat(balance) * 100);
+      if (isNaN(balancePaisa) || balancePaisa < 0) {
         setError('Invalid balance');
         return;
       }
-      await createAccount(name, accountNumber, ifscCode, balanceCents);
+      await createAccount(name, accountNumber, ifscCode, balancePaisa);
       setName('');
       setAccountNumber('');
       setIfscCode('');
@@ -119,7 +119,7 @@ export default function AccountList({ onRefreshNeeded }: Props) {
               />
             </div>
             <div className="flex-1">
-              <label className="block text-sm text-gray-600 mb-1">Initial Balance ($)</label>
+              <label className="block text-sm text-gray-600 mb-1">Initial Balance (₹)</label>
               <input
                 type="number"
                 step="0.01"
@@ -163,7 +163,7 @@ export default function AccountList({ onRefreshNeeded }: Props) {
                   <td className="px-4 py-3 font-mono text-sm text-gray-700">{acc.account_number}</td>
                   <td className="px-4 py-3 font-mono text-sm text-gray-700">{acc.ifsc_code}</td>
                   <td className="px-4 py-3 text-right font-mono text-gray-800">
-                    {formatCents(acc.balance)}
+                    {formatPaisa(acc.balance)}
                   </td>
                   <td className="px-4 py-3 text-gray-500 text-xs">
                     {new Date(acc.created_at).toLocaleDateString()}

@@ -65,7 +65,7 @@ make install
 
 ```bash
 make migrate-up      # creates tables (accounts, transactions, reversals, audit_logs)
-make seed            # inserts test accounts (Alice $100, Bob $50, Charlie $200, Treasury $1000)
+make seed            # inserts test accounts (Alice ₹100, Bob ₹50, Charlie ₹200, Treasury ₹1000)
 ```
 
 ### 6. Start the Application
@@ -89,9 +89,9 @@ make test-concurrency
 ```
 
 This runs 3 automated tests:
-- 20 concurrent $10 transfers from one account — verifies only 10 succeed, no overdraft
+- 20 concurrent ₹10 transfers from one account — verifies only 10 succeed, no overdraft
 - 5 concurrent reversals on the same transaction — verifies only 1 applies
-- 10 concurrent $10 deposits to the same account — verifies all apply correctly
+- 10 concurrent ₹10 deposits to the same account — verifies all apply correctly
 
 ---
 
@@ -189,9 +189,9 @@ banking-ledger/
 
 ### Money Representation: Integer Cents
 
-Balances are stored as `BIGINT` in PostgreSQL, representing **cents** (`$100.00` = `10000`). The `pg` driver is configured to parse BIGINT as JavaScript `Number` (safe up to ~$90 trillion). The frontend converts cents to dollars for display.
+Balances are stored as `BIGINT` in PostgreSQL, representing **paisa** (`₹100.00` = `10000`). The `pg` driver is configured to parse BIGINT as JavaScript `Number` (safe up to ~₹90 trillion). The frontend converts paisa to rupees for display.
 
-**Trade-off:** For a real multi-currency system, `DECIMAL(19,4)` with a currency column would be more appropriate. Integer cents is sufficient for single-currency USD.
+**Trade-off:** For a real multi-currency system, `DECIMAL(19,4)` with a currency column would be more appropriate. Integer paisa is sufficient for single-currency INR.
 
 ### Concurrency: Pessimistic Locking with Ordered Lock Acquisition
 
@@ -257,7 +257,7 @@ For **failures** (insufficient funds, invalid account), the audit log is written
 | `GET` | `/api/transactions` | List transactions — `?account_id=&limit=&offset=` |
 | `GET` | `/api/audit-logs` | List audit logs — `?account_id=&limit=&offset=` |
 
-All amounts are in **cents** (integer). `$10.00` = `1000`.
+All amounts are in **paisa** (integer). `₹10.00` = `1000`.
 
 ---
 
@@ -270,8 +270,8 @@ make test-concurrency
 ```
 
 **Test 1 — Parallel Transfers (overdraft prevention):**
-Creates Account A ($100) and B ($0), fires 20 concurrent $10 transfers A→B.
-- Expected: A = $0, B = $100, exactly 10 succeed, 10 fail with `INSUFFICIENT_FUNDS`
+Creates Account A (₹100) and B (₹0), fires 20 concurrent ₹10 transfers A→B.
+- Expected: A = ₹0, B = ₹100, exactly 10 succeed, 10 fail with `INSUFFICIENT_FUNDS`
 - Audit log has 20 entries (10 SUCCESS + 10 FAILURE)
 
 **Test 2 — Double Reversal Prevention:**
@@ -279,23 +279,23 @@ Performs one transfer, fires 5 concurrent reversals for the same transaction.
 - Expected: exactly 1 reversal applied, balances restored
 
 **Test 3 — Concurrent Deposits:**
-Fires 10 concurrent $10 deposits to the same account.
-- Expected: balance = $100, 10 success entries
+Fires 10 concurrent ₹10 deposits to the same account.
+- Expected: balance = ₹100, 10 success entries
 
 ### Manual Testing
 
 1. Open two browser tabs at http://localhost:5173
 2. In both, go to **Operations → Transfer**
-3. Set up the same transfer (e.g., $50 from Alice to Bob)
+3. Set up the same transfer (e.g., ₹50 from Alice to Bob)
 4. Click submit in both tabs simultaneously
-5. If Alice only had $50, only one should succeed
+5. If Alice only had ₹50, only one should succeed
 6. Check the **Audit Log** tab — one SUCCESS and one FAILURE entry
 
 ---
 
 ## Assumptions
 
-1. **Single currency (USD)** — balances stored as integer cents
+1. **Single currency (INR)** — balances stored as integer paisa
 2. **No authentication/authorization** — this is a demo application
 3. **Balance floor is 0** — accounts cannot go negative (no overdraft)
 4. **Deposits come from outside the system** — no source account required

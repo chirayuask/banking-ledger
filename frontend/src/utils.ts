@@ -1,3 +1,3 @@
-export function formatCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
+export function formatPaisa(paisa: number): string {
+  return `₹${(paisa / 100).toFixed(2)}`;
 }
