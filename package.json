@@ -1,0 +1,29 @@
+{
+  "name": "banking-ledger-node",
+  "version": "1.0.0",
+  "description": "Banking Ledger API — Node.js + Express + PostgreSQL + Redis",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "migrate:up": "node src/db/migrate.js up",
+    "migrate:down": "node src/db/migrate.js down",
+    "seed": "node src/db/seed.js"
+  },
+  "type": "module",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "pg": "^8.20.0",
+    "redis": "^5.12.1",
+    "uuid": "^13.0.0",
+    "winston": "^3.19.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}

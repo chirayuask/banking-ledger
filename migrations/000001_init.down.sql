@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS audit_logs;
+DROP TABLE IF EXISTS reversals;
+DROP TABLE IF EXISTS transactions;
+DROP TABLE IF EXISTS accounts;
