@@ -25,18 +25,29 @@ export const accountRepo = {
     return rows;
   },
 
-  async getByIdForUpdate(client, id) {
-    const { rows } = await client.query(
-      `SELECT id, name, account_number, ifsc_code, balance, created_at, updated_at FROM accounts WHERE id = $1 FOR UPDATE`,
-      [id],
+  // Atomic increment — balance + amount, relies on CHECK (balance >= 0) for safety
+  async incrementBalance(client, id, amount) {
+    const { rowCount } = await client.query(
+      `UPDATE accounts SET balance = balance + $1, updated_at = NOW() WHERE id = $2`,
+      [amount, id],
     );
-    return rows[0] ?? null;
+    if (rowCount === 0) throw { status: 404, code: 'notFound', message: `Account not found: ${id}` };
   },
 
-  async updateBalance(client, id, newBalance) {
-    await client.query(
-      `UPDATE accounts SET balance = $1, updated_at = NOW() WHERE id = $2`,
-      [newBalance, id],
-    );
+  // Atomic decrement — balance - amount, CHECK constraint prevents negative balance
+  async decrementBalance(client, id, amount) {
+    try {
+      const { rowCount } = await client.query(
+        `UPDATE accounts SET balance = balance - $1, updated_at = NOW() WHERE id = $2`,
+        [amount, id],
+      );
+      if (rowCount === 0) throw { status: 404, code: 'notFound', message: `Account not found: ${id}` };
+    } catch (err) {
+      // CHECK constraint violation (balance_non_negative)
+      if (err.code === '23514') {
+        throw { status: 422, code: 'unprocessableEntity', message: 'Insufficient funds' };
+      }
+      throw err;
+    }
   },
 };

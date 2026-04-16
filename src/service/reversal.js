@@ -3,44 +3,28 @@ import { accountRepo } from '../repository/account.js';
 import { transactionRepo } from '../repository/transaction.js';
 import { reversalRepo } from '../repository/reversal.js';
 import { auditRepo } from '../repository/audit.js';
-import logger from '../config/logger.js';
+import { acquireAccountLocks } from '../pkg/redis/client.js';
 
 const reverseTransfer = async (client, originalTxn) => {
   const { source_account_id: sourceId, dest_account_id: destId, amount } = originalTxn;
 
-  // Lock in deterministic order
-  const [firstId, secondId] = sourceId < destId ? [sourceId, destId] : [destId, sourceId];
-
-  const firstAcc = await accountRepo.getByIdForUpdate(client, firstId);
-  const secondAcc = await accountRepo.getByIdForUpdate(client, secondId);
-
-  const sourceAcc = firstAcc.id === sourceId ? firstAcc : secondAcc;
-  const destAcc = firstAcc.id === destId ? firstAcc : secondAcc;
-
-  if (destAcc.balance < amount) {
-    throw { status: 422, code: 'unprocessableEntity', message: 'Destination account has insufficient funds to reverse' };
-  }
-
-  await accountRepo.updateBalance(client, sourceId, sourceAcc.balance + amount);
-  await accountRepo.updateBalance(client, destId, destAcc.balance - amount);
+  // Atomic: credit source, debit dest — CHECK constraint prevents negative
+  await accountRepo.incrementBalance(client, sourceId, amount);
+  await accountRepo.decrementBalance(client, destId, amount);
 };
 
 const reverseDeposit = async (client, originalTxn) => {
   const { dest_account_id: destId, amount } = originalTxn;
 
-  const acc = await accountRepo.getByIdForUpdate(client, destId);
-  if (acc.balance < amount) {
-    throw { status: 422, code: 'unprocessableEntity', message: 'Account has insufficient funds to reverse deposit' };
-  }
-
-  await accountRepo.updateBalance(client, destId, acc.balance - amount);
+  // Atomic debit — CHECK constraint prevents negative balance
+  await accountRepo.decrementBalance(client, destId, amount);
 };
 
 const reverseWithdrawal = async (client, originalTxn) => {
   const { source_account_id: sourceId, amount } = originalTxn;
 
-  const acc = await accountRepo.getByIdForUpdate(client, sourceId);
-  await accountRepo.updateBalance(client, sourceId, acc.balance + amount);
+  // Atomic credit — always safe (adding money)
+  await accountRepo.incrementBalance(client, sourceId, amount);
 };
 
 export const reversalService = {
@@ -62,6 +46,10 @@ export const reversalService = {
       throw { status: 409, code: 'conflict', message: 'Transaction already reversed' };
     }
 
+    // Acquire Redis locks on all involved accounts
+    const accountIds = [originalTxn.source_account_id, originalTxn.dest_account_id];
+    const releaseLocks = await acquireAccountLocks(accountIds);
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -81,7 +69,7 @@ export const reversalService = {
         throw err;
       }
 
-      // Reverse based on type
+      // Reverse based on type — uses atomic increment/decrement
       switch (originalTxn.type) {
         case 'TRANSFER':
           await reverseTransfer(client, originalTxn);
@@ -115,6 +103,7 @@ export const reversalService = {
       throw err;
     } finally {
       client.release();
+      await releaseLocks();
     }
   },
 };

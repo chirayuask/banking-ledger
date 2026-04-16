@@ -2,6 +2,7 @@ import pool from '../db/postgres.js';
 import { accountRepo } from '../repository/account.js';
 import { transactionRepo } from '../repository/transaction.js';
 import { auditRepo } from '../repository/audit.js';
+import { acquireAccountLocks } from '../pkg/redis/client.js';
 import logger from '../config/logger.js';
 
 const logFailure = async (operation, sourceAccountId, destAccountId, amount, reason) => {
@@ -20,25 +21,8 @@ const logFailure = async (operation, sourceAccountId, destAccountId, amount, rea
   }
 };
 
-const logFailureInTx = async (client, operation, sourceAccountId, destAccountId, amount, reason) => {
-  try {
-    await auditRepo.createInTx(client, {
-      operation,
-      sourceAccountId,
-      destAccountId,
-      amount,
-      outcome: 'FAILURE',
-      failureReason: reason,
-      transactionId: null,
-    });
-  } catch (err) {
-    logger.error('Failed to write failure audit log in tx', { error: err.message });
-  }
-};
-
 export const transferService = {
   async transfer({ sourceAccountId, destAccountId, amount, idempotencyKey }) {
-    // Validate: source != dest
     if (sourceAccountId === destAccountId) {
       await logFailure('TRANSFER', sourceAccountId, destAccountId, amount, 'SAME_ACCOUNT');
       throw { status: 400, code: 'badRequest', message: 'Source and destination accounts must be different' };
@@ -48,44 +32,18 @@ export const transferService = {
     const existing = await transactionRepo.getByIdempotencyKey(idempotencyKey);
     if (existing) return existing;
 
-    // Determine lock order: smaller UUID first to prevent deadlocks
-    const [firstId, secondId] = sourceAccountId < destAccountId
-      ? [sourceAccountId, destAccountId]
-      : [destAccountId, sourceAccountId];
+    // Acquire Redis locks on both accounts (sorted order prevents deadlocks)
+    const releaseLocks = await acquireAccountLocks([sourceAccountId, destAccountId]);
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
 
-      // Lock both accounts in deterministic order
-      const firstAcc = await accountRepo.getByIdForUpdate(client, firstId);
-      if (!firstAcc) {
-        await client.query('ROLLBACK');
-        await logFailure('TRANSFER', sourceAccountId, destAccountId, amount, 'ACCOUNT_NOT_FOUND');
-        throw { status: 404, code: 'notFound', message: `Account not found: ${firstId}` };
-      }
+      // Atomic decrement source — CHECK constraint prevents negative balance
+      await accountRepo.decrementBalance(client, sourceAccountId, amount);
 
-      const secondAcc = await accountRepo.getByIdForUpdate(client, secondId);
-      if (!secondAcc) {
-        await client.query('ROLLBACK');
-        await logFailure('TRANSFER', sourceAccountId, destAccountId, amount, 'ACCOUNT_NOT_FOUND');
-        throw { status: 404, code: 'notFound', message: `Account not found: ${secondId}` };
-      }
-
-      // Map back to source/dest
-      const sourceAcc = firstAcc.id === sourceAccountId ? firstAcc : secondAcc;
-      const destAcc = firstAcc.id === destAccountId ? firstAcc : secondAcc;
-
-      // Check sufficient balance
-      if (sourceAcc.balance < amount) {
-        await logFailureInTx(client, 'TRANSFER', sourceAccountId, destAccountId, amount, 'INSUFFICIENT_FUNDS');
-        await client.query('COMMIT'); // commit the failure audit log
-        throw { status: 422, code: 'unprocessableEntity', message: 'Insufficient funds' };
-      }
-
-      // Debit source, credit dest
-      await accountRepo.updateBalance(client, sourceAccountId, sourceAcc.balance - amount);
-      await accountRepo.updateBalance(client, destAccountId, destAcc.balance + amount);
+      // Atomic increment destination
+      await accountRepo.incrementBalance(client, destAccountId, amount);
 
       // Create transaction record
       const txn = await transactionRepo.create(client, {
@@ -112,9 +70,16 @@ export const transferService = {
       return txn;
     } catch (err) {
       if (client) await client.query('ROLLBACK').catch(() => {});
+      // Log failure for business errors
+      if (err.status === 422) {
+        await logFailure('TRANSFER', sourceAccountId, destAccountId, amount, 'INSUFFICIENT_FUNDS');
+      } else if (err.status === 404) {
+        await logFailure('TRANSFER', sourceAccountId, destAccountId, amount, 'ACCOUNT_NOT_FOUND');
+      }
       throw err;
     } finally {
       client.release();
+      await releaseLocks();
     }
   },
 
@@ -122,18 +87,15 @@ export const transferService = {
     const existing = await transactionRepo.getByIdempotencyKey(idempotencyKey);
     if (existing) return existing;
 
+    // Acquire Redis lock on the account
+    const releaseLocks = await acquireAccountLocks([accountId]);
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
 
-      const acc = await accountRepo.getByIdForUpdate(client, accountId);
-      if (!acc) {
-        await client.query('ROLLBACK');
-        await logFailure('DEPOSIT', null, accountId, amount, 'ACCOUNT_NOT_FOUND');
-        throw { status: 404, code: 'notFound', message: 'Account not found' };
-      }
-
-      await accountRepo.updateBalance(client, accountId, acc.balance + amount);
+      // Atomic increment
+      await accountRepo.incrementBalance(client, accountId, amount);
 
       const txn = await transactionRepo.create(client, {
         type: 'DEPOSIT',
@@ -158,9 +120,13 @@ export const transferService = {
       return txn;
     } catch (err) {
       if (client) await client.query('ROLLBACK').catch(() => {});
+      if (err.status === 404) {
+        await logFailure('DEPOSIT', null, accountId, amount, 'ACCOUNT_NOT_FOUND');
+      }
       throw err;
     } finally {
       client.release();
+      await releaseLocks();
     }
   },
 
@@ -168,24 +134,15 @@ export const transferService = {
     const existing = await transactionRepo.getByIdempotencyKey(idempotencyKey);
     if (existing) return existing;
 
+    // Acquire Redis lock on the account
+    const releaseLocks = await acquireAccountLocks([accountId]);
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
 
-      const acc = await accountRepo.getByIdForUpdate(client, accountId);
-      if (!acc) {
-        await client.query('ROLLBACK');
-        await logFailure('WITHDRAWAL', accountId, null, amount, 'ACCOUNT_NOT_FOUND');
-        throw { status: 404, code: 'notFound', message: 'Account not found' };
-      }
-
-      if (acc.balance < amount) {
-        await logFailureInTx(client, 'WITHDRAWAL', accountId, null, amount, 'INSUFFICIENT_FUNDS');
-        await client.query('COMMIT');
-        throw { status: 422, code: 'unprocessableEntity', message: 'Insufficient funds' };
-      }
-
-      await accountRepo.updateBalance(client, accountId, acc.balance - amount);
+      // Atomic decrement — CHECK constraint prevents negative balance
+      await accountRepo.decrementBalance(client, accountId, amount);
 
       const txn = await transactionRepo.create(client, {
         type: 'WITHDRAWAL',
@@ -210,9 +167,15 @@ export const transferService = {
       return txn;
     } catch (err) {
       if (client) await client.query('ROLLBACK').catch(() => {});
+      if (err.status === 422) {
+        await logFailure('WITHDRAWAL', accountId, null, amount, 'INSUFFICIENT_FUNDS');
+      } else if (err.status === 404) {
+        await logFailure('WITHDRAWAL', accountId, null, amount, 'ACCOUNT_NOT_FOUND');
+      }
       throw err;
     } finally {
       client.release();
+      await releaseLocks();
     }
   },
 };
