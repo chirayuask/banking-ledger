@@ -29,10 +29,10 @@ export async function getAccount(id: string): Promise<Account> {
   return res.data!;
 }
 
-export async function createAccount(name: string, initialBalance: number): Promise<Account> {
+export async function createAccount(name: string, accountNumber: string, ifscCode: string, initialBalance: number): Promise<Account> {
   const res = await request<Account>('/accounts', {
     method: 'POST',
-    body: JSON.stringify({ name, initial_balance: initialBalance }),
+    body: JSON.stringify({ name, account_number: accountNumber, ifsc_code: ifscCode, initial_balance: initialBalance }),
   });
   return res.data!;
 }

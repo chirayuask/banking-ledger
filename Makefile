@@ -1,4 +1,4 @@
-.PHONY: dev start migrate-up migrate-down seed test-concurrency install
+.PHONY: dev start migrate-up migrate-down migrate-reset seed test-concurrency install
 
 # Install dependencies
 install:
@@ -18,6 +18,9 @@ migrate-up:
 
 migrate-down:
 	node src/db/migrate.js down
+
+migrate-reset:
+	node src/db/migrate.js reset
 
 seed:
 	node src/db/seed.js

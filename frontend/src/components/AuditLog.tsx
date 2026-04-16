@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
-import type { AuditLog as AuditLogType } from '../api/types';
-import { listAuditLogs } from '../api/client';
+import type { AuditLog as AuditLogType, Account } from '../api/types';
+import { listAuditLogs, listAccounts } from '../api/client';
 import { formatCents } from '../utils';
 
 interface Props {
@@ -9,14 +9,18 @@ interface Props {
 
 export default function AuditLog({ onRefreshNeeded }: Props) {
   const [logs, setLogs] = useState<AuditLogType[]>([]);
+  const [accountsMap, setAccountsMap] = useState<Record<string, Account>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  const fetchLogs = async () => {
+  const fetchData = async () => {
     try {
       setLoading(true);
-      const data = await listAuditLogs();
+      const [data, accounts] = await Promise.all([listAuditLogs(), listAccounts()]);
       setLogs(data);
+      const map: Record<string, Account> = {};
+      accounts.forEach((acc) => { map[acc.id] = acc; });
+      setAccountsMap(map);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -24,8 +28,15 @@ export default function AuditLog({ onRefreshNeeded }: Props) {
     }
   };
 
+  const formatAccount = (id: string | null) => {
+    if (!id) return '-';
+    const acc = accountsMap[id];
+    if (acc) return `${acc.account_number} (${acc.ifsc_code})`;
+    return id;
+  };
+
   useEffect(() => {
-    fetchLogs();
+    fetchData();
   }, [onRefreshNeeded]);
 
   const outcomeBadge = (outcome: string) => {
@@ -68,11 +79,11 @@ export default function AuditLog({ onRefreshNeeded }: Props) {
                     {new Date(log.created_at).toLocaleString()}
                   </td>
                   <td className="px-4 py-3 text-xs font-medium text-gray-700">{log.operation}</td>
-                  <td className="px-4 py-3 font-mono text-xs text-gray-500">
-                    {log.source_account_id ? log.source_account_id.slice(0, 8) + '...' : '-'}
+                  <td className="px-4 py-3 font-mono text-xs text-gray-700">
+                    {formatAccount(log.source_account_id)}
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs text-gray-500">
-                    {log.dest_account_id ? log.dest_account_id.slice(0, 8) + '...' : '-'}
+                  <td className="px-4 py-3 font-mono text-xs text-gray-700">
+                    {formatAccount(log.dest_account_id)}
                   </td>
                   <td className="px-4 py-3 text-right font-mono text-gray-800">
                     {formatCents(log.amount)}

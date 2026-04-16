@@ -4,8 +4,8 @@ import { cache } from '../pkg/redis/cache.js';
 export const accountController = {
   async create(req, res, next) {
     try {
-      const { name, initial_balance } = req.body;
-      const account = await accountService.create(name, initial_balance);
+      const { name, account_number, ifsc_code, initial_balance } = req.body;
+      const account = await accountService.create(name, account_number, ifsc_code, initial_balance);
 
       await cache.invalidateAccountsList();
 

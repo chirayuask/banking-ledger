@@ -12,6 +12,11 @@ function App() {
 
   const triggerRefresh = () => setRefreshCounter((c) => c + 1);
 
+  const handleTabSwitch = (tab: Tab) => {
+    setActiveTab(tab);
+    setRefreshCounter((c) => c + 1);
+  };
+
   const tabs: { key: Tab; label: string }[] = [
     { key: 'accounts', label: 'Accounts' },
     { key: 'operations', label: 'Operations' },
@@ -36,7 +41,7 @@ function App() {
             {tabs.map((tab) => (
               <button
                 key={tab.key}
-                onClick={() => setActiveTab(tab.key)}
+                onClick={() => handleTabSwitch(tab.key)}
                 className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
                   activeTab === tab.key
                     ? 'border-blue-600 text-blue-600'
@@ -57,7 +62,7 @@ function App() {
             <AccountList onRefreshNeeded={refreshCounter} />
           )}
           {activeTab === 'operations' && (
-            <TransferForm onSuccess={triggerRefresh} />
+            <TransferForm onSuccess={triggerRefresh} onRefreshNeeded={refreshCounter} />
           )}
           {activeTab === 'transactions' && (
             <TransactionHistory

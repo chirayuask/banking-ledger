@@ -1,18 +1,18 @@
 import pool from '../db/postgres.js';
 
 export const accountRepo = {
-  async create(name, initialBalance) {
+  async create(name, accountNumber, ifscCode, initialBalance) {
     const { rows } = await pool.query(
-      `INSERT INTO accounts (name, balance) VALUES ($1, $2)
-       RETURNING id, name, balance, created_at, updated_at`,
-      [name, initialBalance],
+      `INSERT INTO accounts (name, account_number, ifsc_code, balance) VALUES ($1, $2, $3, $4)
+       RETURNING id, name, account_number, ifsc_code, balance, created_at, updated_at`,
+      [name, accountNumber, ifscCode, initialBalance],
     );
     return rows[0];
   },
 
   async getById(id) {
     const { rows } = await pool.query(
-      `SELECT id, name, balance, created_at, updated_at FROM accounts WHERE id = $1`,
+      `SELECT id, name, account_number, ifsc_code, balance, created_at, updated_at FROM accounts WHERE id = $1`,
       [id],
     );
     return rows[0] ?? null;
@@ -20,14 +20,14 @@ export const accountRepo = {
 
   async list() {
     const { rows } = await pool.query(
-      `SELECT id, name, balance, created_at, updated_at FROM accounts ORDER BY created_at DESC`,
+      `SELECT id, name, account_number, ifsc_code, balance, created_at, updated_at FROM accounts ORDER BY created_at DESC`,
     );
     return rows;
   },
 
   async getByIdForUpdate(client, id) {
     const { rows } = await client.query(
-      `SELECT id, name, balance, created_at, updated_at FROM accounts WHERE id = $1 FOR UPDATE`,
+      `SELECT id, name, account_number, ifsc_code, balance, created_at, updated_at FROM accounts WHERE id = $1 FOR UPDATE`,
       [id],
     );
     return rows[0] ?? null;

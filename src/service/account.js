@@ -1,8 +1,8 @@
 import { accountRepo } from '../repository/account.js';
 
 export const accountService = {
-  async create(name, initialBalance) {
-    return accountRepo.create(name, initialBalance);
+  async create(name, accountNumber, ifscCode, initialBalance) {
+    return accountRepo.create(name, accountNumber, ifscCode, initialBalance);
   },
 
   async getById(id) {

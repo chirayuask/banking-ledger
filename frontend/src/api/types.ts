@@ -1,6 +1,8 @@
 export interface Account {
   id: string;
   name: string;
+  account_number: string;
+  ifsc_code: string;
   balance: number;
   created_at: string;
   updated_at: string;

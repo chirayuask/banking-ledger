@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
-import type { Transaction } from '../api/types';
-import { listTransactions, createReversal } from '../api/client';
+import type { Transaction, Account } from '../api/types';
+import { listTransactions, listAccounts, createReversal } from '../api/client';
 import { formatCents } from '../utils';
 
 interface Props {
@@ -10,15 +10,19 @@ interface Props {
 
 export default function TransactionHistory({ onRefreshNeeded, onReversalSuccess }: Props) {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [accountsMap, setAccountsMap] = useState<Record<string, Account>>({});
   const [loading, setLoading] = useState(true);
   const [reversingId, setReversingId] = useState<string | null>(null);
   const [error, setError] = useState('');
 
-  const fetchTransactions = async () => {
+  const fetchData = async () => {
     try {
       setLoading(true);
-      const data = await listTransactions();
-      setTransactions(data);
+      const [txns, accounts] = await Promise.all([listTransactions(), listAccounts()]);
+      setTransactions(txns);
+      const map: Record<string, Account> = {};
+      accounts.forEach((acc) => { map[acc.id] = acc; });
+      setAccountsMap(map);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -26,8 +30,15 @@ export default function TransactionHistory({ onRefreshNeeded, onReversalSuccess 
     }
   };
 
+  const formatAccount = (id: string | null) => {
+    if (!id) return '-';
+    const acc = accountsMap[id];
+    if (acc) return `${acc.account_number} (${acc.ifsc_code})`;
+    return id;
+  };
+
   useEffect(() => {
-    fetchTransactions();
+    fetchData();
   }, [onRefreshNeeded]);
 
   const handleReverse = async (txnId: string) => {
@@ -35,7 +46,7 @@ export default function TransactionHistory({ onRefreshNeeded, onReversalSuccess 
     setReversingId(txnId);
     try {
       await createReversal(txnId);
-      fetchTransactions();
+      fetchData();
       onReversalSuccess();
     } catch (err: any) {
       setError(err.message);
@@ -93,11 +104,11 @@ export default function TransactionHistory({ onRefreshNeeded, onReversalSuccess 
                     {new Date(txn.created_at).toLocaleString()}
                   </td>
                   <td className="px-4 py-3">{typeBadge(txn.type)}</td>
-                  <td className="px-4 py-3 font-mono text-xs text-gray-500">
-                    {txn.source_account_id ? txn.source_account_id.slice(0, 8) + '...' : '-'}
+                  <td className="px-4 py-3 font-mono text-xs text-gray-700">
+                    {formatAccount(txn.source_account_id)}
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs text-gray-500">
-                    {txn.dest_account_id ? txn.dest_account_id.slice(0, 8) + '...' : '-'}
+                  <td className="px-4 py-3 font-mono text-xs text-gray-700">
+                    {formatAccount(txn.dest_account_id)}
                   </td>
                   <td className="px-4 py-3 text-right font-mono text-gray-800">
                     {formatCents(txn.amount)}

@@ -4,11 +4,12 @@ import { listAccounts, createTransfer, createDeposit, createWithdrawal } from '.
 
 interface Props {
   onSuccess: () => void;
+  onRefreshNeeded?: number;
 }
 
 type OperationType = 'transfer' | 'deposit' | 'withdrawal';
 
-export default function TransferForm({ onSuccess }: Props) {
+export default function TransferForm({ onSuccess, onRefreshNeeded }: Props) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [opType, setOpType] = useState<OperationType>('transfer');
   const [sourceId, setSourceId] = useState('');
@@ -21,7 +22,7 @@ export default function TransferForm({ onSuccess }: Props) {
 
   useEffect(() => {
     listAccounts().then(setAccounts).catch(() => {});
-  }, []);
+  }, [onRefreshNeeded]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -118,7 +119,7 @@ export default function TransferForm({ onSuccess }: Props) {
                 <option value="">Select source...</option>
                 {accounts.map((acc) => (
                   <option key={acc.id} value={acc.id}>
-                    {acc.name} (${(acc.balance / 100).toFixed(2)})
+                    {acc.name} — {acc.account_number} ({acc.ifsc_code}) — ${(acc.balance / 100).toFixed(2)}
                   </option>
                 ))}
               </select>
@@ -134,7 +135,7 @@ export default function TransferForm({ onSuccess }: Props) {
                 <option value="">Select destination...</option>
                 {accounts.map((acc) => (
                   <option key={acc.id} value={acc.id}>
-                    {acc.name} (${(acc.balance / 100).toFixed(2)})
+                    {acc.name} — {acc.account_number} ({acc.ifsc_code}) — ${(acc.balance / 100).toFixed(2)}
                   </option>
                 ))}
               </select>
@@ -152,7 +153,7 @@ export default function TransferForm({ onSuccess }: Props) {
               <option value="">Select account...</option>
               {accounts.map((acc) => (
                 <option key={acc.id} value={acc.id}>
-                  {acc.name} (${(acc.balance / 100).toFixed(2)})
+                  {acc.name} — {acc.account_number} ({acc.ifsc_code}) — ${(acc.balance / 100).toFixed(2)}
                 </option>
               ))}
             </select>
