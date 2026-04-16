@@ -8,7 +8,6 @@ import { acquireAccountLocks } from '../pkg/redis/client.js';
 const reverseTransfer = async (client, originalTxn) => {
   const { source_account_id: sourceId, dest_account_id: destId, amount } = originalTxn;
 
-  // Atomic: credit source, debit dest — CHECK constraint prevents negative
   await accountRepo.incrementBalance(client, sourceId, amount);
   await accountRepo.decrementBalance(client, destId, amount);
 };
@@ -16,37 +15,23 @@ const reverseTransfer = async (client, originalTxn) => {
 const reverseDeposit = async (client, originalTxn) => {
   const { dest_account_id: destId, amount } = originalTxn;
 
-  // Atomic debit — CHECK constraint prevents negative balance
   await accountRepo.decrementBalance(client, destId, amount);
 };
 
 const reverseWithdrawal = async (client, originalTxn) => {
   const { source_account_id: sourceId, amount } = originalTxn;
 
-  // Atomic credit — always safe (adding money)
   await accountRepo.incrementBalance(client, sourceId, amount);
 };
 
 export const reversalService = {
   async reverse({ transactionId, idempotencyKey }) {
-    // Idempotency check on reversal key
-    const existingRev = await reversalRepo.getByIdempotencyKey(idempotencyKey);
-    if (existingRev) return existingRev;
-
-    // Find original transaction
+    // We need the original transaction to know which accounts to lock and reverse
     const originalTxn = await transactionRepo.getById(transactionId);
     if (!originalTxn) {
       throw { status: 404, code: 'notFound', message: 'Transaction not found' };
     }
 
-    // Already reversed? Return existing reversal for idempotency
-    if (originalTxn.status === 'REVERSED') {
-      const existing = await reversalRepo.getByOriginalTransactionId(transactionId);
-      if (existing) return existing;
-      throw { status: 409, code: 'conflict', message: 'Transaction already reversed' };
-    }
-
-    // Acquire Redis locks on all involved accounts
     const accountIds = [originalTxn.source_account_id, originalTxn.dest_account_id];
     const releaseLocks = await acquireAccountLocks(accountIds);
 
@@ -54,22 +39,20 @@ export const reversalService = {
     try {
       await client.query('BEGIN');
 
-      // Insert reversal — UNIQUE constraint prevents duplicates
+      // Attempt INSERT — UNIQUE constraints on original_transaction_id and
+      // idempotency_key will reject duplicates. No pre-check needed.
       let reversal;
       try {
         reversal = await reversalRepo.create(client, transactionId, idempotencyKey);
       } catch (err) {
-        // Unique violation = concurrent reversal already won
         if (err.code === '23505') {
           await client.query('ROLLBACK');
-          const existing = await reversalRepo.getByOriginalTransactionId(transactionId);
-          if (existing) return existing;
           throw { status: 409, code: 'conflict', message: 'Transaction already reversed' };
         }
         throw err;
       }
 
-      // Reverse based on type — uses atomic increment/decrement
+      // Reverse based on type
       switch (originalTxn.type) {
         case 'TRANSFER':
           await reverseTransfer(client, originalTxn);
