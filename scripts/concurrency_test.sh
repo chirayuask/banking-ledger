@@ -55,6 +55,46 @@ print(len(data))
 " 2>/dev/null
 }
 
+# Helper: count audit rows by walking all pages (limit is capped at 200 server-side).
+# Filters in Python: match REVERSAL/FAILURE rows with a specific failure_reason.
+count_reversal_failures_full() {
+    local reason=$1
+    python3 <<EOF
+import sys, json, urllib.request
+offset = 0
+total = 0
+while True:
+    with urllib.request.urlopen(f"$BASE_URL/api/audit-logs?limit=200&offset={offset}") as r:
+        rows = json.load(r)['data']
+    if not rows:
+        break
+    total += sum(1 for x in rows if x.get('operation')=='REVERSAL' and x.get('outcome')=='FAILURE' and x.get('failure_reason')=="$reason")
+    if len(rows) < 200:
+        break
+    offset += 200
+print(total)
+EOF
+}
+
+count_validation_failures_for_op_full() {
+    local op=$1
+    python3 <<EOF
+import sys, json, urllib.request
+offset = 0
+total = 0
+while True:
+    with urllib.request.urlopen(f"$BASE_URL/api/audit-logs?limit=200&offset={offset}") as r:
+        rows = json.load(r)['data']
+    if not rows:
+        break
+    total += sum(1 for x in rows if x.get('operation')=="$op" and x.get('outcome')=='FAILURE' and (x.get('failure_reason') or '').startswith('VALIDATION'))
+    if len(rows) < 200:
+        break
+    offset += 200
+print(total)
+EOF
+}
+
 echo "========================================"
 echo "  Banking Ledger Concurrency Tests"
 echo "========================================"
@@ -359,14 +399,9 @@ echo ""
 log_info "TEST 8: Reversal failures produce FAILURE audit entries"
 
 # Helper: count REVERSAL/FAILURE audits matching a specific failure_reason.
+# Paginates through all audit rows since server caps limit at 200.
 count_reversal_failures_with_reason() {
-    local reason=$1
-    curl -s "$BASE_URL/api/audit-logs?limit=200" | python3 -c "
-import sys, json
-rows = json.load(sys.stdin)['data']
-n = sum(1 for r in rows if r.get('operation')=='REVERSAL' and r.get('outcome')=='FAILURE' and r.get('failure_reason')=='$reason')
-print(n)
-" 2>/dev/null
+    count_reversal_failures_full "$1"
 }
 
 BEFORE_NOT_FOUND=$(count_reversal_failures_with_reason "TRANSACTION_NOT_FOUND")
@@ -443,13 +478,7 @@ echo ""
 log_info "TEST 9: Validation failures are audited (balance-changing endpoints)"
 
 count_validation_failures_for_op() {
-    local op=$1
-    curl -s "$BASE_URL/api/audit-logs?limit=200" | python3 -c "
-import sys, json
-rows = json.load(sys.stdin)['data']
-n = sum(1 for r in rows if r.get('operation')=='$op' and r.get('outcome')=='FAILURE' and (r.get('failure_reason') or '').startswith('VALIDATION'))
-print(n)
-" 2>/dev/null
+    count_validation_failures_for_op_full "$1"
 }
 
 BEFORE_T=$(count_validation_failures_for_op "TRANSFER")

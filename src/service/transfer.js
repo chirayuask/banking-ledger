@@ -41,9 +41,6 @@ export const transferService = {
       throw { status: 400, code: 'badRequest', message: 'Source and destination accounts must be different' };
     }
 
-    const existing = await transactionRepo.getByIdempotencyKey(idempotencyKey);
-    if (existing) return existing;
-
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -76,6 +73,10 @@ export const transferService = {
       return txn;
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
+      // Idempotent replay: same key retried — return the winner's transaction.
+      if (err.code === '23505' && err.constraint === 'transactions_idempotency_key_key') {
+        return transactionRepo.getByIdempotencyKey(idempotencyKey);
+      }
       if (err.status === 422) {
         await logFailure('TRANSFER', sourceAccountId, destAccountId, amount, 'INSUFFICIENT_FUNDS');
       } else if (err.status === 404) {
@@ -88,9 +89,6 @@ export const transferService = {
   },
 
   async deposit({ accountId, amount, idempotencyKey }) {
-    const existing = await transactionRepo.getByIdempotencyKey(idempotencyKey);
-    if (existing) return existing;
-
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -122,6 +120,9 @@ export const transferService = {
       return txn;
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
+      if (err.code === '23505' && err.constraint === 'transactions_idempotency_key_key') {
+        return transactionRepo.getByIdempotencyKey(idempotencyKey);
+      }
       if (err.status === 404) {
         await logFailure('DEPOSIT', null, accountId, amount, 'ACCOUNT_NOT_FOUND');
       }
@@ -132,9 +133,6 @@ export const transferService = {
   },
 
   async withdraw({ accountId, amount, idempotencyKey }) {
-    const existing = await transactionRepo.getByIdempotencyKey(idempotencyKey);
-    if (existing) return existing;
-
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -166,6 +164,9 @@ export const transferService = {
       return txn;
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
+      if (err.code === '23505' && err.constraint === 'transactions_idempotency_key_key') {
+        return transactionRepo.getByIdempotencyKey(idempotencyKey);
+      }
       if (err.status === 422) {
         await logFailure('WITHDRAWAL', accountId, null, amount, 'INSUFFICIENT_FUNDS');
       } else if (err.status === 404) {

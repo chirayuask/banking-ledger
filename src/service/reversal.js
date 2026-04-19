@@ -70,10 +70,6 @@ export const reversalService = {
       throw { status: 404, code: 'notFound', message: 'Transaction not found' };
     }
 
-    // Idempotency replay: same key returns the prior reversal response.
-    const replay = await reversalRepo.getByIdempotencyKey(idempotencyKey);
-    if (replay) return withOriginalAccounts(replay, originalTxn);
-
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -89,12 +85,13 @@ export const reversalService = {
       } catch (err) {
         if (err.code === '23505') {
           await client.query('ROLLBACK');
-          // Same idempotency key raced past the pre-check: return the winner's result.
-          if (err.constraint === 'reversals_idempotency_key_key') {
-            const winner = await reversalRepo.getByIdempotencyKey(idempotencyKey);
-            if (winner) return withOriginalAccounts(winner, originalTxn);
+          // Existing reversal found. If the retry uses the SAME idempotency key
+          // it's a replay (return 201 with the winner). Otherwise it's a genuine
+          // conflict from a different client.
+          const existing = await reversalRepo.getByOriginalTransactionId(transactionId);
+          if (existing && existing.idempotency_key === idempotencyKey) {
+            return withOriginalAccounts(existing, originalTxn);
           }
-          // Different key, same transaction — genuine conflict.
           await logFailure({
             sourceAccountId: originalTxn.source_account_id,
             destAccountId: originalTxn.dest_account_id,
