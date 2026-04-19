@@ -33,12 +33,22 @@ const lockAccountsForUpdate = async (client, accountIds) => {
   }
 };
 
+const withOriginalAccounts = (reversal, originalTxn) => ({
+  ...reversal,
+  original_source_account_id: originalTxn.source_account_id,
+  original_dest_account_id: originalTxn.dest_account_id,
+});
+
 export const reversalService = {
   async reverse({ transactionId, idempotencyKey }) {
     const originalTxn = await transactionRepo.getById(transactionId);
     if (!originalTxn) {
       throw { status: 404, code: 'notFound', message: 'Transaction not found' };
     }
+
+    // Idempotency replay: same key returns the prior reversal response.
+    const replay = await reversalRepo.getByIdempotencyKey(idempotencyKey);
+    if (replay) return withOriginalAccounts(replay, originalTxn);
 
     const client = await pool.connect();
     try {
@@ -49,13 +59,18 @@ export const reversalService = {
         originalTxn.dest_account_id,
       ]);
 
-      // UNIQUE(original_transaction_id) and UNIQUE(idempotency_key) reject duplicates.
       let reversal;
       try {
         reversal = await reversalRepo.create(client, transactionId, idempotencyKey);
       } catch (err) {
         if (err.code === '23505') {
           await client.query('ROLLBACK');
+          // Same idempotency key raced past the pre-check: return the winner's result.
+          if (err.constraint === 'reversals_idempotency_key_key') {
+            const winner = await reversalRepo.getByIdempotencyKey(idempotencyKey);
+            if (winner) return withOriginalAccounts(winner, originalTxn);
+          }
+          // Different key, same transaction — genuine conflict.
           throw { status: 409, code: 'conflict', message: 'Transaction already reversed' };
         }
         throw err;
@@ -86,11 +101,7 @@ export const reversalService = {
       });
 
       await client.query('COMMIT');
-      return {
-        ...reversal,
-        original_source_account_id: originalTxn.source_account_id,
-        original_dest_account_id: originalTxn.dest_account_id,
-      };
+      return withOriginalAccounts(reversal, originalTxn);
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
       throw err;
