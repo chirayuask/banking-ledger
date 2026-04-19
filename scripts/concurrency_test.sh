@@ -8,6 +8,9 @@ BASE_URL="${BASE_URL:-http://localhost:8080}"
 PASS=0
 FAIL=0
 
+# Unique per-run suffix so idempotency keys don't replay prior transactions.
+RUN_ID="$(date +%s)-$$"
+
 # Colors
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -19,13 +22,18 @@ log_fail() { FAIL=$((FAIL+1)); echo -e "${RED}[FAIL]${NC} $1"; }
 log_info() { echo -e "${YELLOW}[INFO]${NC} $1"; }
 
 # Helper: create an account and return its ID
+# Schema requires account_number and ifsc_code; generate unique values per call.
 create_account() {
     local name=$1
     local balance=$2
+    local acct_num
+    local ifsc
+    acct_num=$(python3 -c "import random; print(''.join(random.choices('0123456789', k=10)))")
+    ifsc=$(python3 -c "import random,string; print(''.join(random.choices(string.ascii_uppercase, k=4)) + '0' + ''.join(random.choices('0123456789', k=6)))")
     local result
     result=$(curl -s -X POST "$BASE_URL/api/accounts" \
         -H "Content-Type: application/json" \
-        -d "{\"name\": \"$name\", \"initial_balance\": $balance}")
+        -d "{\"name\": \"$name\", \"initial_balance\": $balance, \"account_number\": \"$acct_num\", \"ifsc_code\": \"$ifsc\"}")
     echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])" 2>/dev/null
 }
 
@@ -80,7 +88,7 @@ for i in $(seq 1 20); do
             \"source_account_id\": \"$ACCOUNT_A\",
             \"dest_account_id\": \"$ACCOUNT_B\",
             \"amount\": 1000,
-            \"idempotency_key\": \"test1-transfer-$i\"
+            \"idempotency_key\": \"test1-${RUN_ID}-transfer-$i\"
         }" -o /dev/null &
     pids+=($!)
 done
@@ -131,7 +139,7 @@ TXN_RESULT=$(curl -s -X POST "$BASE_URL/api/transfers" \
         \"source_account_id\": \"$ACCOUNT_C\",
         \"dest_account_id\": \"$ACCOUNT_D\",
         \"amount\": 2000,
-        \"idempotency_key\": \"test2-transfer-1\"
+        \"idempotency_key\": \"test2-${RUN_ID}-transfer-1\"
     }")
 
 TXN_ID=$(echo "$TXN_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])" 2>/dev/null)
@@ -150,7 +158,7 @@ for i in $(seq 1 5); do
         -H "Content-Type: application/json" \
         -d "{
             \"transaction_id\": \"$TXN_ID\",
-            \"idempotency_key\": \"test2-reversal-$i\"
+            \"idempotency_key\": \"test2-${RUN_ID}-reversal-$i\"
         }" -o /dev/null &
     pids+=($!)
 done
@@ -191,7 +199,7 @@ for i in $(seq 1 10); do
         -d "{
             \"account_id\": \"$ACCOUNT_E\",
             \"amount\": 1000,
-            \"idempotency_key\": \"test3-deposit-$i\"
+            \"idempotency_key\": \"test3-${RUN_ID}-deposit-$i\"
         }" -o /dev/null &
     pids+=($!)
 done

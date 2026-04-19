@@ -2,7 +2,6 @@ import pool from '../db/postgres.js';
 import { accountRepo } from '../repository/account.js';
 import { transactionRepo } from '../repository/transaction.js';
 import { auditRepo } from '../repository/audit.js';
-import { acquireAccountLocks } from '../pkg/redis/client.js';
 import logger from '../config/logger.js';
 
 const logFailure = async (operation, sourceAccountId, destAccountId, amount, reason) => {
@@ -21,6 +20,20 @@ const logFailure = async (operation, sourceAccountId, destAccountId, amount, rea
   }
 };
 
+// Lock rows FOR UPDATE in deterministic order so concurrent transfers A↔B can't deadlock.
+const lockAccountsForUpdate = async (client, accountIds) => {
+  const sorted = [...new Set(accountIds.filter(Boolean))].sort();
+  for (const id of sorted) {
+    const { rowCount } = await client.query(
+      'SELECT id FROM accounts WHERE id = $1 FOR UPDATE',
+      [id],
+    );
+    if (rowCount === 0) {
+      throw { status: 404, code: 'notFound', message: `Account not found: ${id}` };
+    }
+  }
+};
+
 export const transferService = {
   async transfer({ sourceAccountId, destAccountId, amount, idempotencyKey }) {
     if (sourceAccountId === destAccountId) {
@@ -28,24 +41,18 @@ export const transferService = {
       throw { status: 400, code: 'badRequest', message: 'Source and destination accounts must be different' };
     }
 
-    // Idempotency check
     const existing = await transactionRepo.getByIdempotencyKey(idempotencyKey);
     if (existing) return existing;
-
-    // Acquire Redis locks on both accounts (sorted order prevents deadlocks)
-    const releaseLocks = await acquireAccountLocks([sourceAccountId, destAccountId]);
 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
 
-      // Atomic decrement source — CHECK constraint prevents negative balance
-      await accountRepo.decrementBalance(client, sourceAccountId, amount);
+      await lockAccountsForUpdate(client, [sourceAccountId, destAccountId]);
 
-      // Atomic increment destination
+      await accountRepo.decrementBalance(client, sourceAccountId, amount);
       await accountRepo.incrementBalance(client, destAccountId, amount);
 
-      // Create transaction record
       const txn = await transactionRepo.create(client, {
         type: 'TRANSFER',
         sourceAccountId,
@@ -55,7 +62,6 @@ export const transferService = {
         idempotencyKey,
       });
 
-      // Audit log
       await auditRepo.createInTx(client, {
         operation: 'TRANSFER',
         sourceAccountId,
@@ -69,8 +75,7 @@ export const transferService = {
       await client.query('COMMIT');
       return txn;
     } catch (err) {
-      if (client) await client.query('ROLLBACK').catch(() => {});
-      // Log failure for business errors
+      await client.query('ROLLBACK').catch(() => {});
       if (err.status === 422) {
         await logFailure('TRANSFER', sourceAccountId, destAccountId, amount, 'INSUFFICIENT_FUNDS');
       } else if (err.status === 404) {
@@ -79,7 +84,6 @@ export const transferService = {
       throw err;
     } finally {
       client.release();
-      await releaseLocks();
     }
   },
 
@@ -87,14 +91,12 @@ export const transferService = {
     const existing = await transactionRepo.getByIdempotencyKey(idempotencyKey);
     if (existing) return existing;
 
-    // Acquire Redis lock on the account
-    const releaseLocks = await acquireAccountLocks([accountId]);
-
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
 
-      // Atomic increment
+      await lockAccountsForUpdate(client, [accountId]);
+
       await accountRepo.incrementBalance(client, accountId, amount);
 
       const txn = await transactionRepo.create(client, {
@@ -119,14 +121,13 @@ export const transferService = {
       await client.query('COMMIT');
       return txn;
     } catch (err) {
-      if (client) await client.query('ROLLBACK').catch(() => {});
+      await client.query('ROLLBACK').catch(() => {});
       if (err.status === 404) {
         await logFailure('DEPOSIT', null, accountId, amount, 'ACCOUNT_NOT_FOUND');
       }
       throw err;
     } finally {
       client.release();
-      await releaseLocks();
     }
   },
 
@@ -134,14 +135,12 @@ export const transferService = {
     const existing = await transactionRepo.getByIdempotencyKey(idempotencyKey);
     if (existing) return existing;
 
-    // Acquire Redis lock on the account
-    const releaseLocks = await acquireAccountLocks([accountId]);
-
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
 
-      // Atomic decrement — CHECK constraint prevents negative balance
+      await lockAccountsForUpdate(client, [accountId]);
+
       await accountRepo.decrementBalance(client, accountId, amount);
 
       const txn = await transactionRepo.create(client, {
@@ -166,7 +165,7 @@ export const transferService = {
       await client.query('COMMIT');
       return txn;
     } catch (err) {
-      if (client) await client.query('ROLLBACK').catch(() => {});
+      await client.query('ROLLBACK').catch(() => {});
       if (err.status === 422) {
         await logFailure('WITHDRAWAL', accountId, null, amount, 'INSUFFICIENT_FUNDS');
       } else if (err.status === 404) {
@@ -175,7 +174,6 @@ export const transferService = {
       throw err;
     } finally {
       client.release();
-      await releaseLocks();
     }
   },
 };

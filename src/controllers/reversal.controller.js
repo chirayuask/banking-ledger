@@ -11,7 +11,10 @@ export const reversalController = {
         idempotencyKey: idempotency_key,
       });
 
-      await cache.invalidateAccountsList();
+      await cache.invalidateForTransfer(
+        reversal.original_source_account_id,
+        reversal.original_dest_account_id,
+      );
 
       res.status(201).json({ status: 'success', data: reversal });
     } catch (err) {

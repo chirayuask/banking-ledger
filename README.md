@@ -121,8 +121,8 @@ This runs 3 automated tests:
 | Layer | Technology | Rationale |
 |-------|-----------|-----------|
 | Backend | Node.js 22 + Express 5 (ESM) | Modern JS — `import/export`, top-level `await`, `??`, `?.` |
-| Database | PostgreSQL 16 | `SELECT FOR UPDATE` row locking, CHECK constraints, ACID transactions |
-| Cache | Redis 7 | Balance read cache (30s TTL), idempotency key deduplication (24h TTL) |
+| Database | PostgreSQL 16 | `SELECT ... FOR UPDATE` row locking, CHECK constraints, ACID transactions |
+| Cache | Redis 7 | Balance read cache (30s TTL), idempotency key deduplication (24h TTL) — **not used for locking** |
 | DB Driver | `pg` (node-postgres) | Mature, connection pooling, explicit transaction control via `pool.connect()` |
 | Frontend | React + TypeScript + Vite + Tailwind CSS 4 | Fast dev cycle, type safety, functional UI |
 
@@ -193,45 +193,23 @@ Balances are stored as `BIGINT` in PostgreSQL, representing **paisa** (`₹100.0
 
 **Trade-off:** For a real multi-currency system, `DECIMAL(19,4)` with a currency column would be more appropriate. Integer paisa is sufficient for single-currency INR.
 
-### Concurrency: Redis Distributed Lock + Postgres Transaction + CHECK Constraint
+### Concurrency: Postgres Row Locks + CHECK Constraint
 
-Concurrency safety is enforced by **three independent layers**, not one. Each layer catches a different failure mode.
+Concurrency safety is enforced by the database, not by the application. Every balance-changing operation runs inside a single Postgres transaction that:
 
-**Flow for a transfer:**
+1. `BEGIN`s a transaction on a dedicated pooled connection.
+2. `SELECT ... FOR UPDATE`s every account it will touch, in **sorted ID order** (prevents deadlock when two transfers touch the same pair of accounts in opposite directions).
+3. Applies the balance changes via `UPDATE accounts SET balance = balance ± $amount`. The `CHECK (balance >= 0)` constraint rejects any UPDATE that would drive a balance negative (error code `23514` → `422 Insufficient funds`).
+4. Inserts `transactions` + `audit_logs` rows in the same transaction.
+5. `COMMIT`s. On any error, `ROLLBACK` rolls back every change atomically.
 
-1. Check idempotency key (Redis) — short-circuit if this request already ran.
-2. Acquire **Redis distributed lock** on each involved account, keys sorted in a canonical order (prevents deadlocks across workers).
-3. `const client = await pool.connect()` — checkout a dedicated connection.
-4. `BEGIN` a Postgres transaction.
-5. `UPDATE accounts SET balance = balance - $amount WHERE id = $src` — atomic decrement. The `CHECK (balance >= 0)` constraint rejects the row if the result would be negative (Postgres error code `23514`). The service maps this to `422 Insufficient funds`.
-6. `UPDATE accounts SET balance = balance + $amount WHERE id = $dst` — atomic increment.
-7. Insert `transactions` row + `audit_logs` row (same transaction).
-8. `COMMIT`. On any error, `ROLLBACK` and the balance changes disappear.
-9. `client.release()` returns the connection to the pool.
-10. Release the Redis locks (Lua script, only deletes if we still own the lock token — prevents releasing a lock that already expired and was re-acquired by someone else).
+**Why row locks instead of a Redis distributed lock?** A Postgres row lock is held until `COMMIT`/`ROLLBACK` — it cannot expire mid-transaction. A Redis lock with a TTL can expire while the DB transaction is still running, which breaks mutual exclusion exactly when it matters most. For a single-Postgres ledger, the database is already the source of truth for balances, so the strongest and simplest guarantee is the one the database gives you for free.
 
-**What each layer guarantees:**
+**Why ordered locking?** If Transfer(A→B) locks A then waits for B, and Transfer(B→A) locks B then waits for A, Postgres will eventually break the deadlock with an error. Sorting the account IDs before locking means both transactions queue on the same row first — the second just waits for the first to commit, no deadlock possible.
 
-| Layer | What it protects against |
-|-------|--------------------------|
-| Redis lock (`SET NX EX`) on sorted account IDs | Two workers trying to modify the same account at the same moment; ordered acquisition prevents deadlock when two transfers touch the same pair of accounts in opposite directions |
-| Postgres transaction (`BEGIN`/`COMMIT`/`ROLLBACK`) | Atomicity — the debit, credit, transaction row, and audit row either all persist or none do |
-| `CHECK (balance >= 0)` constraint | Final safety net — even if the Redis lock failed, crashed, or a bug skipped it, the DB will reject any UPDATE that would drive a balance negative |
+**Why `pool.connect()` instead of `pool.query()`?** A transaction must run on a single connection. `pool.query()` checks a connection out per statement, which breaks transaction continuity. `pool.connect()` gives us one connection for `BEGIN` → … → `COMMIT`.
 
-**Why Redis locks instead of `SELECT ... FOR UPDATE`?**
-
-Row-level locks in Postgres only coordinate transactions on the same database. Redis gives us a single, cheap choke point across all backend workers and is easy to reason about — `SET key value NX EX 5` with a random token, released by a Lua script that compares the token before deleting.
-
-The trade-off is that Redis locks are **advisory**: if a worker skips the lock, Postgres won't stop it. That's why the `CHECK` constraint is non-negotiable — it's the invariant that holds even if every application-layer guard fails.
-
-**Why ordered lock acquisition?** If Transfer(A→B) acquires lock A then asks for B, and Transfer(B→A) acquires lock B then asks for A, both spin until their retry budget runs out. By always acquiring locks in sorted key order, the second transfer queues on lock A and proceeds cleanly after the first releases.
-
-**Why `pool.connect()` instead of `pool.query()`?** We need multiple queries within the same transaction on the same connection. `pool.query()` grabs and releases a connection per query — no transaction continuity.
-
-**Lock parameters** (see [src/pkg/redis/client.js](src/pkg/redis/client.js)):
-- `LOCK_TTL = 5s` — auto-expires if the holder crashes, so the account is never permanently stuck.
-- `retries = 50`, `retryDelayMs = 100ms` — up to ~5s waiting for a contended lock before giving up.
-- Unique UUID token per lock acquisition — `safeRelease` only deletes the key if the token still matches, so we never free someone else's lock.
+**What about the `CHECK` constraint, then?** The row lock serializes writers so no two transfers can interleave UPDATEs on the same account. The `CHECK` is the ultimate invariant: even if a future code path skips the service layer, or a migration/admin script directly UPDATEs balances, Postgres refuses to store a negative number. Locks coordinate access; constraints enforce invariants — we want both.
 
 ### Reversal: UNIQUE Constraint as the Concurrency Guard
 
@@ -253,11 +231,14 @@ For **failures** (insufficient funds, invalid account), the audit log is written
 
 **Why not async (Kafka/Redis Streams)?** Async audit risks losing entries if a worker crashes. The assignment requires all operations to be auditable. Synchronous writes ensure completeness.
 
-### Redis: Cache-Aside + Idempotency
+### Redis: Cache-Aside + Idempotency (No Distributed Locking)
 
-**Balance cache:** `GET /api/accounts` checks Redis first (30s TTL). Any write operation invalidates affected account caches. This offloads read-heavy dashboard requests from Postgres.
+Redis is intentionally kept out of the concurrency critical path. It's used only for:
 
-**Idempotency keys:** Stored in Redis with 24h TTL. Duplicate requests are caught before even opening a DB transaction.
+- **Balance cache** — `GET /api/accounts` checks Redis first (30s TTL). Writes invalidate affected account caches. Offloads dashboard reads from Postgres.
+- **Idempotency keys** — short-circuit duplicate requests (24h TTL) before opening a DB transaction.
+
+Earlier iterations used a Redis `SET NX EX` distributed lock to serialize account access. That was removed because Postgres row locks (`SELECT ... FOR UPDATE`) give a strictly stronger guarantee for a single-database system — they can't expire mid-transaction — and adding Redis on top was extra machinery without extra safety.
 
 ### Balance Floor: CHECK Constraint
 
