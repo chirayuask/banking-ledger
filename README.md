@@ -193,33 +193,55 @@ Balances are stored as `BIGINT` in PostgreSQL, representing **paisa** (`₹100.0
 
 **Trade-off:** For a real multi-currency system, `DECIMAL(19,4)` with a currency column would be more appropriate. Integer paisa is sufficient for single-currency INR.
 
-### Concurrency: Pessimistic Locking with Ordered Lock Acquisition
+### Concurrency: Redis Distributed Lock + Postgres Transaction + CHECK Constraint
 
-The transfer flow uses `SELECT ... FOR UPDATE` within a `READ COMMITTED` transaction:
+Concurrency safety is enforced by **three independent layers**, not one. Each layer catches a different failure mode.
 
-1. `const client = await pool.connect()` — checkout a dedicated connection
-2. `BEGIN` transaction
-3. `SELECT ... FOR UPDATE` both accounts, **sorted by UUID** (smaller UUID first)
-4. Validate `balance >= amount`
-5. Debit source, credit destination
-6. Insert transaction record + audit log
-7. `COMMIT`
-8. `client.release()` — return connection to pool
+**Flow for a transfer:**
 
-**Why ordered locking?** Without deterministic lock ordering, `Transfer(A→B)` and `Transfer(B→A)` running concurrently will deadlock. By always locking the smaller UUID first, we prevent this entirely.
+1. Check idempotency key (Redis) — short-circuit if this request already ran.
+2. Acquire **Redis distributed lock** on each involved account, keys sorted in a canonical order (prevents deadlocks across workers).
+3. `const client = await pool.connect()` — checkout a dedicated connection.
+4. `BEGIN` a Postgres transaction.
+5. `UPDATE accounts SET balance = balance - $amount WHERE id = $src` — atomic decrement. The `CHECK (balance >= 0)` constraint rejects the row if the result would be negative (Postgres error code `23514`). The service maps this to `422 Insufficient funds`.
+6. `UPDATE accounts SET balance = balance + $amount WHERE id = $dst` — atomic increment.
+7. Insert `transactions` row + `audit_logs` row (same transaction).
+8. `COMMIT`. On any error, `ROLLBACK` and the balance changes disappear.
+9. `client.release()` returns the connection to the pool.
+10. Release the Redis locks (Lua script, only deletes if we still own the lock token — prevents releasing a lock that already expired and was re-acquired by someone else).
 
-**Why pessimistic over optimistic?** Optimistic locking (version columns + retry loops) adds application complexity and is better suited for low-contention scenarios. For a banking app where correctness is paramount, pessimistic locking with `FOR UPDATE` is the standard approach.
+**What each layer guarantees:**
+
+| Layer | What it protects against |
+|-------|--------------------------|
+| Redis lock (`SET NX EX`) on sorted account IDs | Two workers trying to modify the same account at the same moment; ordered acquisition prevents deadlock when two transfers touch the same pair of accounts in opposite directions |
+| Postgres transaction (`BEGIN`/`COMMIT`/`ROLLBACK`) | Atomicity — the debit, credit, transaction row, and audit row either all persist or none do |
+| `CHECK (balance >= 0)` constraint | Final safety net — even if the Redis lock failed, crashed, or a bug skipped it, the DB will reject any UPDATE that would drive a balance negative |
+
+**Why Redis locks instead of `SELECT ... FOR UPDATE`?**
+
+Row-level locks in Postgres only coordinate transactions on the same database. Redis gives us a single, cheap choke point across all backend workers and is easy to reason about — `SET key value NX EX 5` with a random token, released by a Lua script that compares the token before deleting.
+
+The trade-off is that Redis locks are **advisory**: if a worker skips the lock, Postgres won't stop it. That's why the `CHECK` constraint is non-negotiable — it's the invariant that holds even if every application-layer guard fails.
+
+**Why ordered lock acquisition?** If Transfer(A→B) acquires lock A then asks for B, and Transfer(B→A) acquires lock B then asks for A, both spin until their retry budget runs out. By always acquiring locks in sorted key order, the second transfer queues on lock A and proceeds cleanly after the first releases.
 
 **Why `pool.connect()` instead of `pool.query()`?** We need multiple queries within the same transaction on the same connection. `pool.query()` grabs and releases a connection per query — no transaction continuity.
 
+**Lock parameters** (see [src/pkg/redis/client.js](src/pkg/redis/client.js)):
+- `LOCK_TTL = 5s` — auto-expires if the holder crashes, so the account is never permanently stuck.
+- `retries = 50`, `retryDelayMs = 100ms` — up to ~5s waiting for a contended lock before giving up.
+- Unique UUID token per lock acquisition — `safeRelease` only deletes the key if the token still matches, so we never free someone else's lock.
+
 ### Reversal: UNIQUE Constraint as the Concurrency Guard
 
-The `reversals` table has `UNIQUE(original_transaction_id)`. This means:
-- First reversal INSERT succeeds
-- Concurrent reversal INSERTs get a Postgres error code `23505` (unique_violation)
-- The application catches this and returns the existing reversal (idempotent response)
+The `reversals` table has `UNIQUE(original_transaction_id)` and `UNIQUE(idempotency_key)`. The reversal flow also acquires Redis locks on the involved accounts (same pattern as transfers), but the **true concurrency guarantee lives in the DB constraint**:
 
-This is a **database-level guarantee** — no application-level distributed locks or check-then-act patterns needed.
+- First reversal `INSERT` for a given `original_transaction_id` succeeds.
+- Any concurrent or duplicate reversal `INSERT` fails with Postgres error code `23505` (unique_violation).
+- The service catches `23505`, rolls back, and returns `409 Conflict — Transaction already reversed`.
+
+Because the uniqueness check is enforced by the database, it's safe against any race condition the application might miss — including two requests that pass the Redis lock at the exact same moment or requests from two machines when Redis is unreachable.
 
 ### Audit Log: Synchronous, In-Transaction
 
