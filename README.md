@@ -175,8 +175,9 @@ banking-ledger/
 │       ├── migrate.js                 # SQL migration runner (up/down)
 │       └── seed.js                    # Test data seeder
 ├── migrations/
-│   ├── 000001_init.up.sql
-│   └── 000001_init.down.sql
+│   ├── 000001_init.up.sql / .down.sql
+│   ├── 000002_add_account_metadata.up.sql / .down.sql
+│   └── 000003_audit_transaction_index.up.sql / .down.sql
 ├── scripts/
 │   ├── seed.sql
 │   └── concurrency_test.sh
@@ -211,25 +212,36 @@ Concurrency safety is enforced by the database, not by the application. Every ba
 
 **What about the `CHECK` constraint, then?** The row lock serializes writers so no two transfers can interleave UPDATEs on the same account. The `CHECK` is the ultimate invariant: even if a future code path skips the service layer, or a migration/admin script directly UPDATEs balances, Postgres refuses to store a negative number. Locks coordinate access; constraints enforce invariants — we want both.
 
-### Reversal: UNIQUE Constraint as the Concurrency Guard
+### Reversal: UNIQUE Constraint + Idempotency Replay
 
-The `reversals` table has `UNIQUE(original_transaction_id)` and `UNIQUE(idempotency_key)`. The reversal flow also acquires Redis locks on the involved accounts (same pattern as transfers), but the **true concurrency guarantee lives in the DB constraint**:
+The `reversals` table has `UNIQUE(original_transaction_id)` and `UNIQUE(idempotency_key)`. Concurrency and replay semantics are enforced by the database:
 
 - First reversal `INSERT` for a given `original_transaction_id` succeeds.
-- Any concurrent or duplicate reversal `INSERT` fails with Postgres error code `23505` (unique_violation).
-- The service catches `23505`, rolls back, and returns `409 Conflict — Transaction already reversed`.
+- A **retry with the same idempotency key** is caught by a pre-check (reads the existing row) and by the `UNIQUE(idempotency_key)` constraint inside the transaction — the service returns the original reversal with `201 Created`, not `409`.
+- A **different client trying to reverse the already-reversed transaction** (different idempotency key) fails the `UNIQUE(original_transaction_id)` constraint — the service returns `409 Conflict — Transaction already reversed`.
 
-Because the uniqueness check is enforced by the database, it's safe against any race condition the application might miss — including two requests that pass the Redis lock at the exact same moment or requests from two machines when Redis is unreachable.
+Because the uniqueness check is enforced by the database, it's safe against any race condition the application might miss. The reversal flow also acquires Postgres row locks (`SELECT ... FOR UPDATE`) on the involved accounts before applying balance changes, same as transfers.
 
 ### Audit Log: Synchronous, In-Transaction
 
-Audit logs are written in the **same Postgres transaction** as the balance changes. If the transfer commits, the audit commits. If it rolls back, the audit rolls back.
+Successful balance-changing operations write their audit row in the **same Postgres transaction** as the balance change. If the transfer commits, the audit commits. If it rolls back, the audit rolls back.
 
-For **failures** (insufficient funds, invalid account), the audit log is written outside the transaction since no balance change occurred.
+Failures are written outside the transaction (no balance change happened) via a best-effort `logFailure` helper. Covered failure reasons:
 
-**Why not a Postgres trigger?** Triggers fire on row changes, so they can't log failures (no row change happens). We'd need two audit systems — trigger for successes, app code for failures.
+| Operation | Failure reasons recorded |
+|---|---|
+| `TRANSFER` | `INSUFFICIENT_FUNDS`, `ACCOUNT_NOT_FOUND`, `SAME_ACCOUNT`, `VALIDATION: <detail>` |
+| `DEPOSIT` | `ACCOUNT_NOT_FOUND`, `VALIDATION: <detail>` |
+| `WITHDRAWAL` | `INSUFFICIENT_FUNDS`, `ACCOUNT_NOT_FOUND`, `VALIDATION: <detail>` |
+| `REVERSAL` | `TRANSACTION_NOT_FOUND`, `ALREADY_REVERSED`, `INSUFFICIENT_FUNDS`, `ACCOUNT_NOT_FOUND`, `VALIDATION: <detail>` |
 
-**Why not async (Kafka/Redis Streams)?** Async audit risks losing entries if a worker crashes. The assignment requires all operations to be auditable. Synchronous writes ensure completeness.
+**Validation failures** are audited by the `validate` middleware before the service ever runs — invalid inputs (negative amount, bad UUID, missing field) still leave an audit trail so reviewers can see attempted bad requests.
+
+**Why not a Postgres trigger?** Triggers fire on row changes, so they can't log failures. We'd need two audit systems — trigger for successes, app code for failures.
+
+**Why not async (Kafka/outbox)?** An outbox pattern (audit row written in-transaction, drained by a worker) would be strictly stronger for production — it survives post-COMMIT crashes. For this assignment's scope, in-transaction sync writes + best-effort failure logging cover every balance-changing attempt the assignment requires.
+
+**Known gap:** if the Node process crashes between COMMIT and response, the client won't get a response but the audit is consistent with DB state (the balance change did land). Idempotency keys let the client retry safely.
 
 ### Redis: Cache-Aside + Idempotency (No Distributed Locking)
 

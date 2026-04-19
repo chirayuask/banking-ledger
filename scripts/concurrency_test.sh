@@ -354,6 +354,153 @@ fi
 echo ""
 
 # ------------------------------------------
+# TEST 8: Reversal failures are audited
+# ------------------------------------------
+log_info "TEST 8: Reversal failures produce FAILURE audit entries"
+
+# Helper: count REVERSAL/FAILURE audits matching a specific failure_reason.
+count_reversal_failures_with_reason() {
+    local reason=$1
+    curl -s "$BASE_URL/api/audit-logs?limit=200" | python3 -c "
+import sys, json
+rows = json.load(sys.stdin)['data']
+n = sum(1 for r in rows if r.get('operation')=='REVERSAL' and r.get('outcome')=='FAILURE' and r.get('failure_reason')=='$reason')
+print(n)
+" 2>/dev/null
+}
+
+BEFORE_NOT_FOUND=$(count_reversal_failures_with_reason "TRANSACTION_NOT_FOUND")
+BEFORE_ALREADY_REVERSED=$(count_reversal_failures_with_reason "ALREADY_REVERSED")
+BEFORE_INSUFFICIENT=$(count_reversal_failures_with_reason "INSUFFICIENT_FUNDS")
+
+# 8a: Reverse a non-existent transaction → TRANSACTION_NOT_FOUND
+curl -s -X POST "$BASE_URL/api/reversals" \
+    -H "Content-Type: application/json" \
+    -d "{\"transaction_id\": \"00000000-0000-0000-0000-000000000000\", \"idempotency_key\": \"test8-${RUN_ID}-notfound\"}" \
+    -o /dev/null
+
+# 8b: Reverse an already-reversed txn with a NEW key → ALREADY_REVERSED
+#     (reuse TXN4_ID from Test 4, which was reversed there)
+curl -s -X POST "$BASE_URL/api/reversals" \
+    -H "Content-Type: application/json" \
+    -d "{\"transaction_id\": \"$TXN4_ID\", \"idempotency_key\": \"test8-${RUN_ID}-already\"}" \
+    -o /dev/null
+
+# 8c: Reverse a DEPOSIT after the money was spent → INSUFFICIENT_FUNDS
+ACCOUNT_X=$(create_account "Test-X" 0)
+ACCOUNT_Y=$(create_account "Test-Y" 0)
+
+DEP_RES=$(curl -s -X POST "$BASE_URL/api/deposits" \
+    -H "Content-Type: application/json" \
+    -d "{\"account_id\": \"$ACCOUNT_X\", \"amount\": 2000, \"idempotency_key\": \"test8-${RUN_ID}-deposit\"}")
+DEP_TXN=$(echo "$DEP_RES" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])" 2>/dev/null)
+
+# Drain the deposit out of X so reversal won't have funds to pull back
+curl -s -X POST "$BASE_URL/api/transfers" \
+    -H "Content-Type: application/json" \
+    -d "{\"source_account_id\": \"$ACCOUNT_X\", \"dest_account_id\": \"$ACCOUNT_Y\", \"amount\": 2000, \"idempotency_key\": \"test8-${RUN_ID}-drain\"}" \
+    -o /dev/null
+
+# Now try to reverse the deposit — should fail INSUFFICIENT_FUNDS
+curl -s -X POST "$BASE_URL/api/reversals" \
+    -H "Content-Type: application/json" \
+    -d "{\"transaction_id\": \"$DEP_TXN\", \"idempotency_key\": \"test8-${RUN_ID}-revdeposit\"}" \
+    -o /dev/null
+
+sleep 1
+
+AFTER_NOT_FOUND=$(count_reversal_failures_with_reason "TRANSACTION_NOT_FOUND")
+AFTER_ALREADY_REVERSED=$(count_reversal_failures_with_reason "ALREADY_REVERSED")
+AFTER_INSUFFICIENT=$(count_reversal_failures_with_reason "INSUFFICIENT_FUNDS")
+
+log_info "TRANSACTION_NOT_FOUND: $BEFORE_NOT_FOUND -> $AFTER_NOT_FOUND"
+log_info "ALREADY_REVERSED:      $BEFORE_ALREADY_REVERSED -> $AFTER_ALREADY_REVERSED"
+log_info "INSUFFICIENT_FUNDS:    $BEFORE_INSUFFICIENT -> $AFTER_INSUFFICIENT"
+
+if [ "$AFTER_NOT_FOUND" -gt "$BEFORE_NOT_FOUND" ]; then
+    log_pass "TRANSACTION_NOT_FOUND audited"
+else
+    log_fail "TRANSACTION_NOT_FOUND not audited"
+fi
+
+if [ "$AFTER_ALREADY_REVERSED" -gt "$BEFORE_ALREADY_REVERSED" ]; then
+    log_pass "ALREADY_REVERSED audited"
+else
+    log_fail "ALREADY_REVERSED not audited"
+fi
+
+if [ "$AFTER_INSUFFICIENT" -gt "$BEFORE_INSUFFICIENT" ]; then
+    log_pass "INSUFFICIENT_FUNDS (on reversal) audited"
+else
+    log_fail "INSUFFICIENT_FUNDS (on reversal) not audited"
+fi
+
+echo ""
+
+# ------------------------------------------
+# TEST 9: Validation failures produce FAILURE audit entries
+# ------------------------------------------
+log_info "TEST 9: Validation failures are audited (balance-changing endpoints)"
+
+count_validation_failures_for_op() {
+    local op=$1
+    curl -s "$BASE_URL/api/audit-logs?limit=200" | python3 -c "
+import sys, json
+rows = json.load(sys.stdin)['data']
+n = sum(1 for r in rows if r.get('operation')=='$op' and r.get('outcome')=='FAILURE' and (r.get('failure_reason') or '').startswith('VALIDATION'))
+print(n)
+" 2>/dev/null
+}
+
+BEFORE_T=$(count_validation_failures_for_op "TRANSFER")
+BEFORE_D=$(count_validation_failures_for_op "DEPOSIT")
+BEFORE_W=$(count_validation_failures_for_op "WITHDRAWAL")
+BEFORE_R=$(count_validation_failures_for_op "REVERSAL")
+
+# 9a: transfer with negative amount → VALIDATION
+curl -s -X POST "$BASE_URL/api/transfers" \
+    -H "Content-Type: application/json" \
+    -d "{\"source_account_id\": \"$ACCOUNT_A\", \"dest_account_id\": \"$ACCOUNT_B\", \"amount\": -50, \"idempotency_key\": \"test9-${RUN_ID}-neg\"}" \
+    -o /dev/null
+
+# 9b: deposit with invalid UUID → VALIDATION
+curl -s -X POST "$BASE_URL/api/deposits" \
+    -H "Content-Type: application/json" \
+    -d "{\"account_id\": \"not-a-uuid\", \"amount\": 100, \"idempotency_key\": \"test9-${RUN_ID}-uuid\"}" \
+    -o /dev/null
+
+# 9c: withdrawal missing amount → VALIDATION
+curl -s -X POST "$BASE_URL/api/withdrawals" \
+    -H "Content-Type: application/json" \
+    -d "{\"account_id\": \"$ACCOUNT_A\", \"idempotency_key\": \"test9-${RUN_ID}-miss\"}" \
+    -o /dev/null
+
+# 9d: reversal with missing idempotency_key → VALIDATION
+curl -s -X POST "$BASE_URL/api/reversals" \
+    -H "Content-Type: application/json" \
+    -d "{\"transaction_id\": \"00000000-0000-0000-0000-000000000000\"}" \
+    -o /dev/null
+
+sleep 1
+
+AFTER_T=$(count_validation_failures_for_op "TRANSFER")
+AFTER_D=$(count_validation_failures_for_op "DEPOSIT")
+AFTER_W=$(count_validation_failures_for_op "WITHDRAWAL")
+AFTER_R=$(count_validation_failures_for_op "REVERSAL")
+
+log_info "TRANSFER   VALIDATION: $BEFORE_T -> $AFTER_T"
+log_info "DEPOSIT    VALIDATION: $BEFORE_D -> $AFTER_D"
+log_info "WITHDRAWAL VALIDATION: $BEFORE_W -> $AFTER_W"
+log_info "REVERSAL   VALIDATION: $BEFORE_R -> $AFTER_R"
+
+if [ "$AFTER_T" -gt "$BEFORE_T" ]; then log_pass "TRANSFER validation failure audited"; else log_fail "TRANSFER validation failure not audited"; fi
+if [ "$AFTER_D" -gt "$BEFORE_D" ]; then log_pass "DEPOSIT validation failure audited"; else log_fail "DEPOSIT validation failure not audited"; fi
+if [ "$AFTER_W" -gt "$BEFORE_W" ]; then log_pass "WITHDRAWAL validation failure audited"; else log_fail "WITHDRAWAL validation failure not audited"; fi
+if [ "$AFTER_R" -gt "$BEFORE_R" ]; then log_pass "REVERSAL validation failure audited"; else log_fail "REVERSAL validation failure not audited"; fi
+
+echo ""
+
+# ------------------------------------------
 # Summary
 # ------------------------------------------
 echo "========================================"

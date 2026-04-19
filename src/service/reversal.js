@@ -3,6 +3,23 @@ import { accountRepo } from '../repository/account.js';
 import { transactionRepo } from '../repository/transaction.js';
 import { reversalRepo } from '../repository/reversal.js';
 import { auditRepo } from '../repository/audit.js';
+import logger from '../config/logger.js';
+
+const logFailure = async ({ sourceAccountId, destAccountId, amount, reason, transactionId }) => {
+  try {
+    await auditRepo.create({
+      operation: 'REVERSAL',
+      sourceAccountId,
+      destAccountId,
+      amount,
+      outcome: 'FAILURE',
+      failureReason: reason,
+      transactionId,
+    });
+  } catch (err) {
+    logger.error('Failed to write reversal failure audit log', { error: err.message });
+  }
+};
 
 const reverseTransfer = async (client, originalTxn) => {
   const { source_account_id: sourceId, dest_account_id: destId, amount } = originalTxn;
@@ -43,6 +60,13 @@ export const reversalService = {
   async reverse({ transactionId, idempotencyKey }) {
     const originalTxn = await transactionRepo.getById(transactionId);
     if (!originalTxn) {
+      await logFailure({
+        sourceAccountId: null,
+        destAccountId: null,
+        amount: 0,
+        reason: 'TRANSACTION_NOT_FOUND',
+        transactionId: null,
+      });
       throw { status: 404, code: 'notFound', message: 'Transaction not found' };
     }
 
@@ -71,6 +95,13 @@ export const reversalService = {
             if (winner) return withOriginalAccounts(winner, originalTxn);
           }
           // Different key, same transaction — genuine conflict.
+          await logFailure({
+            sourceAccountId: originalTxn.source_account_id,
+            destAccountId: originalTxn.dest_account_id,
+            amount: originalTxn.amount,
+            reason: 'ALREADY_REVERSED',
+            transactionId,
+          });
           throw { status: 409, code: 'conflict', message: 'Transaction already reversed' };
         }
         throw err;
@@ -104,6 +135,19 @@ export const reversalService = {
       return withOriginalAccounts(reversal, originalTxn);
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
+      const reason =
+        err.status === 422 ? 'INSUFFICIENT_FUNDS' :
+        err.status === 404 ? 'ACCOUNT_NOT_FOUND' :
+        null;
+      if (reason) {
+        await logFailure({
+          sourceAccountId: originalTxn.source_account_id,
+          destAccountId: originalTxn.dest_account_id,
+          amount: originalTxn.amount,
+          reason,
+          transactionId,
+        });
+      }
       throw err;
     } finally {
       client.release();

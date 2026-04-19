@@ -5,6 +5,6 @@ import { reversalController } from '../controllers/reversal.controller.js';
 
 const router = Router();
 
-router.post('/', validate(reversalSchema), reversalController.reverse);
+router.post('/', validate(reversalSchema, { operation: 'REVERSAL' }), reversalController.reverse);
 
 export default router;
